@@ -19,7 +19,7 @@ class MACDBBV1ControllerConfig(DirectionalTradingControllerConfigBase):
         json_schema_extra={
             "prompt": "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ",
             "prompt_on_new": True})
-    candles_trading_pair: str = Field(
+    trading_pair: str = Field(
         default=None,
         json_schema_extra={
             "prompt": "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ",
@@ -44,6 +44,9 @@ class MACDBBV1ControllerConfig(DirectionalTradingControllerConfigBase):
     macd_signal: int = Field(
         default=9,
         json_schema_extra={"prompt": "Enter the MACD signal period: ", "prompt_on_new": True})
+    rsi_low: float = Field(default=20, gt=0)
+    rsi_high: float = Field(default=80, gt=0)
+    rsi_length: int = Field(default=14, gt=0)
 
     @field_validator("candles_connector", mode="before")
     @classmethod
@@ -52,9 +55,9 @@ class MACDBBV1ControllerConfig(DirectionalTradingControllerConfigBase):
             return validation_info.data.get("connector_name")
         return v
 
-    @field_validator("candles_trading_pair", mode="before")
+    @field_validator("trading_pair", mode="before")
     @classmethod
-    def set_candles_trading_pair(cls, v, validation_info: ValidationInfo):
+    def set_trading_pair(cls, v, validation_info: ValidationInfo):
         if v is None or v == "":
             return validation_info.data.get("trading_pair")
         return v
@@ -64,11 +67,16 @@ class MACDBBV1Controller(DirectionalTradingControllerBase):
 
     def __init__(self, config: MACDBBV1ControllerConfig, *args, **kwargs):
         self.config = config
+        # print(config)
         self.max_records = max(config.macd_slow, config.macd_fast, config.macd_signal, config.bb_length) + 20
         if len(self.config.candles_config) == 0:
+            # print("Initializing candles config")
+            # print(config.candles_connector)
+            # print(config.trading_pair)
+            # print(config.interval)
             self.config.candles_config = [CandlesConfig(
                 connector=config.candles_connector,
-                trading_pair=config.candles_trading_pair,
+                trading_pair=config.trading_pair,
                 interval=config.interval,
                 max_records=self.max_records
             )]
@@ -76,20 +84,24 @@ class MACDBBV1Controller(DirectionalTradingControllerBase):
 
     async def update_processed_data(self):
         df = self.market_data_provider.get_candles_df(connector_name=self.config.candles_connector,
-                                                      trading_pair=self.config.candles_trading_pair,
+                                                      trading_pair=self.config.trading_pair,
                                                       interval=self.config.interval,
                                                       max_records=self.max_records)
         # Add indicators
         df.ta.bbands(length=self.config.bb_length, std=self.config.bb_std, append=True)
         df.ta.macd(fast=self.config.macd_fast, slow=self.config.macd_slow, signal=self.config.macd_signal, append=True)
+        
+        df.ta.rsi(length=self.config.rsi_length, append=True)
 
         bbp = df[f"BBP_{self.config.bb_length}_{self.config.bb_std}"]
         macdh = df[f"MACDh_{self.config.macd_fast}_{self.config.macd_slow}_{self.config.macd_signal}"]
         macd = df[f"MACD_{self.config.macd_fast}_{self.config.macd_slow}_{self.config.macd_signal}"]
+        
+        rsi = df[f"RSI_{self.config.rsi_length}"]
 
         # Generate signal
-        long_condition = (bbp < self.config.bb_long_threshold) & (macdh > 0) & (macd < 0)
-        short_condition = (bbp > self.config.bb_short_threshold) & (macdh < 0) & (macd > 0)
+        long_condition = (bbp < self.config.bb_long_threshold) & (macdh > 0) & (macd < 0) & rsi < self.config.rsi_low
+        short_condition = (bbp > self.config.bb_short_threshold) & (macdh < 0) & (macd > 0) & rsi > self.config.rsi_high
 
         df["signal"] = 0
         df.loc[long_condition, "signal"] = 1
